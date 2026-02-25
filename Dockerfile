@@ -13,7 +13,7 @@ RUN go mod download
 COPY . .
 
 # Build the binary
-RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o mcp-mariadb ./cmd/mcp-mariadb
+RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o mcp-mariadb ./cmd/...
 
 # Runtime stage
 FROM alpine:latest

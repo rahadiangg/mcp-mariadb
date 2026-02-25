@@ -39,14 +39,20 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
           cache: true
+
+      - name: List files (debug)
+        run: |
+          echo "Repository structure:"
+          ls -la
+          echo ""
+          echo "cmd directory:"
+          ls -la cmd/ || echo "cmd directory not found"
 
       - name: Build
         env:
@@ -58,7 +64,7 @@ jobs:
           BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           LDFLAGS="-s -w -X main.version=$VERSION -X main.buildTime=$BUILD_TIME"
           OUTPUT_NAME="mcp-mariadb-${GOOS}-${GOARCH}${{ matrix.suffix }}"
-          go build -ldflags "$LDFLAGS" -o "$OUTPUT_NAME" ./cmd/mcp-mariadb
+          go build -ldflags "$LDFLAGS" -o "$OUTPUT_NAME" ./cmd/...
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -74,8 +80,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
@@ -105,8 +109,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3

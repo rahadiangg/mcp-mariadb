@@ -1,0 +1,48 @@
+# Git
+.git
+.gitignore
+.github
+
+# Documentation
+README.md
+LICENSE
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Test
+test/
+*.test
+.env.test
+
+# Docker
+docker-compose.yml
+Dockerfile
+.dockerignore
+
+# Build artifacts
+*.exe
+*.dll
+*.so
+*.dylib
+mcp-mariadb
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Go
+vendor/
+go.work
+go.work.sum
+*.out
+*.prof
+
+# Docker volumes
+docker-volumes/
