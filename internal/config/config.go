@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/joho/godotenv"
+	"github.com/rahadiangg/mcp-mariadb/internal/util"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )
@@ -22,17 +23,32 @@ type Config struct {
 	Charset  string
 
 	// SSL
-	SSL              bool
-	SSLCA            string
-	SSLCert          string
-	SSLKey           string
-	SSLVerifyCert    bool
-	SSLVerifyIdentity bool
+	SSL                bool
+	SSLCA              string
+	SSLCert            string
+	SSLKey             string
+	SSLVerifyCert      bool
+	SSLVerifyIdentity  bool
 
 	// Server behavior
 	ReadOnly     bool
 	MaxPoolSize  int
 	PoolRecycle  int // seconds
+
+	// Security limits
+	MaxQuerySize int // bytes
+
+	// Connection timeouts (seconds)
+	ConnMaxIdleTime int
+	ConnTimeout     int
+	ReadTimeout     int
+	WriteTimeout    int
+
+	// CORS configuration
+	CORSAllowOrigins     string
+	CORSAllowMethods     string
+	CORSAllowHeaders     string
+	CORSAllowCredentials bool
 
 	// Embeddings
 	EmbeddingProvider string // "openai", "gemini", or "" for disabled
@@ -105,11 +121,20 @@ func Load() (*Config, *zap.Logger, error) {
 		SSLCA:    getEnv("SSL_CA", ""),
 		SSLCert:  getEnv("SSL_CERT", ""),
 		SSLKey:   getEnv("SSL_KEY", ""),
-		SSLVerifyCert:    getEnvBool("SSL_VERIFY_CERT", true),
+		SSLVerifyCert:     getEnvBool("SSL_VERIFY_CERT", true),
 		SSLVerifyIdentity: getEnvBool("SSL_VERIFY_IDENTITY", false),
-		ReadOnly:         getEnvBool("READ_ONLY", true),
-		MaxPoolSize:      getEnvInt("MAX_POOL_SIZE", 10),
-		PoolRecycle:      getEnvInt("POOL_RECYCLE", 3600),
+		ReadOnly:          getEnvBool("READ_ONLY", true),
+		MaxPoolSize:       getEnvInt("MAX_POOL_SIZE", 10),
+		PoolRecycle:       getEnvInt("POOL_RECYCLE", 3600),
+		MaxQuerySize:      getEnvInt("MAX_QUERY_SIZE", 1048576), // 1MB default
+		ConnMaxIdleTime:   getEnvInt("CONN_MAX_IDLETIME", 600), // 10 minutes
+		ConnTimeout:       getEnvInt("CONN_TIMEOUT", 10),        // 10 seconds
+		ReadTimeout:       getEnvInt("READ_TIMEOUT", 30),        // 30 seconds
+		WriteTimeout:      getEnvInt("WRITE_TIMEOUT", 30),       // 30 seconds
+		CORSAllowOrigins:  getEnv("CORS_ALLOW_ORIGINS", ""),
+		CORSAllowMethods:  getEnv("CORS_ALLOW_METHODS", "GET, POST, OPTIONS"),
+		CORSAllowHeaders:  getEnv("CORS_ALLOW_HEADERS", "Content-Type, Authorization"),
+		CORSAllowCredentials: getEnvBool("CORS_ALLOW_CREDENTIALS", false),
 		EmbeddingProvider: strings.ToLower(getEnv("EMBEDDING_PROVIDER", "")),
 		OpenAIKey:         getEnv("OPENAI_KEY", ""),
 		GeminiKey:         getEnv("GEMINI_KEY", ""),
@@ -121,6 +146,38 @@ func Load() (*Config, *zap.Logger, error) {
 		return nil, logger, fmt.Errorf("DB_USER is required")
 	}
 
+	// Validate port range
+	if err := util.ValidatePort(cfg.Port); err != nil {
+		logger.Error("Invalid port", zap.Error(err))
+		return nil, logger, err
+	}
+
+	// Validate SSL files if SSL is enabled
+	if cfg.SSL {
+		if cfg.SSLCA != "" {
+			if err := util.ValidateSSLFile(cfg.SSLCA, false); err != nil {
+				logger.Warn("SSL CA file validation warning", zap.Error(err))
+				// Continue on warnings for non-key files
+			}
+		}
+		if cfg.SSLCert != "" {
+			if err := util.ValidateSSLFile(cfg.SSLCert, false); err != nil {
+				logger.Warn("SSL certificate file validation warning", zap.Error(err))
+			}
+		}
+		if cfg.SSLKey != "" {
+			if err := util.ValidateSSLFile(cfg.SSLKey, true); err != nil {
+				logger.Error("SSL key file validation failed", zap.Error(err))
+				return nil, logger, err
+			}
+		}
+	}
+
+	// Validate CORS configuration
+	if cfg.CORSAllowOrigins == "*" {
+		logger.Warn("CORS_ALLOW_ORIGINS set to wildcard (*) - allows requests from any origin")
+	}
+
 	// Validate embedding configuration
 	if cfg.EmbeddingProvider != "" {
 		switch cfg.EmbeddingProvider {
@@ -129,10 +186,18 @@ func Load() (*Config, *zap.Logger, error) {
 				logger.Error("OPENAI_KEY is required when EMBEDDING_PROVIDER is 'openai'")
 				return nil, logger, fmt.Errorf("OPENAI_KEY is required for openai provider")
 			}
+			if err := util.ValidateAPIKeyFormat("openai", cfg.OpenAIKey); err != nil {
+				logger.Error("Invalid OPENAI_KEY format", zap.Error(err))
+				return nil, logger, fmt.Errorf("invalid OPENAI_KEY: %w", err)
+			}
 		case "gemini":
 			if cfg.GeminiKey == "" {
 				logger.Error("GEMINI_KEY is required when EMBEDDING_PROVIDER is 'gemini'")
 				return nil, logger, fmt.Errorf("GEMINI_KEY is required for gemini provider")
+			}
+			if err := util.ValidateAPIKeyFormat("gemini", cfg.GeminiKey); err != nil {
+				logger.Error("Invalid GEMINI_KEY format", zap.Error(err))
+				return nil, logger, fmt.Errorf("invalid GEMINI_KEY: %w", err)
 			}
 		default:
 			logger.Warn("Unknown embedding provider, disabling embeddings",
@@ -149,6 +214,12 @@ func Load() (*Config, *zap.Logger, error) {
 		zap.Bool("ssl", cfg.SSL),
 		zap.Bool("read_only", cfg.ReadOnly),
 		zap.Int("max_pool_size", cfg.MaxPoolSize),
+		zap.Int("max_query_size", cfg.MaxQuerySize),
+		zap.Int("conn_max_idle_time", cfg.ConnMaxIdleTime),
+		zap.Int("conn_timeout", cfg.ConnTimeout),
+		zap.Int("read_timeout", cfg.ReadTimeout),
+		zap.Int("write_timeout", cfg.WriteTimeout),
+		zap.String("cors_allow_origins", cfg.CORSAllowOrigins),
 		zap.String("embedding_provider", cfg.EmbeddingProvider),
 	)
 

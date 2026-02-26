@@ -34,6 +34,10 @@ type Config struct {
 	SSLVerifyIdentity bool
 	MaxOpenConns      int
 	ConnMaxLifetime   time.Duration
+	ConnMaxIdleTime   time.Duration
+	ConnTimeout       time.Duration
+	ReadTimeout       time.Duration
+	WriteTimeout      time.Duration
 }
 
 // NewPool creates a new safe connection pool
@@ -66,6 +70,9 @@ func NewPool(ctx context.Context, cfg *Config, logger *zap.Logger) (*SafePool, e
 	}
 	if cfg.ConnMaxLifetime > 0 {
 		db.SetConnMaxLifetime(cfg.ConnMaxLifetime)
+	}
+	if cfg.ConnMaxIdleTime > 0 {
+		db.SetConnMaxIdleTime(cfg.ConnMaxIdleTime)
 	}
 
 	// Verify connection
@@ -104,6 +111,17 @@ func buildDSN(cfg *Config) string {
 
 	if cfg.Charset != "" {
 		params = append(params, "charset="+cfg.Charset)
+	}
+
+	// Add timeout parameters
+	if cfg.ConnTimeout > 0 {
+		params = append(params, fmt.Sprintf("timeout=%ds", int(cfg.ConnTimeout.Seconds())))
+	}
+	if cfg.ReadTimeout > 0 {
+		params = append(params, fmt.Sprintf("readTimeout=%ds", int(cfg.ReadTimeout.Seconds())))
+	}
+	if cfg.WriteTimeout > 0 {
+		params = append(params, fmt.Sprintf("writeTimeout=%ds", int(cfg.WriteTimeout.Seconds())))
 	}
 
 	// SSL configuration

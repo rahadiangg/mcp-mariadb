@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -96,6 +97,10 @@ func (s *Server) initialize(ctx context.Context) {
 		SSLVerifyIdentity: s.cfg.SSLVerifyIdentity,
 		MaxOpenConns:      s.cfg.MaxPoolSize,
 		ConnMaxLifetime:   3600 * time.Second,
+		ConnMaxIdleTime:   time.Duration(s.cfg.ConnMaxIdleTime) * time.Second,
+		ConnTimeout:       time.Duration(s.cfg.ConnTimeout) * time.Second,
+		ReadTimeout:       time.Duration(s.cfg.ReadTimeout) * time.Second,
+		WriteTimeout:      time.Duration(s.cfg.WriteTimeout) * time.Second,
 	}
 
 	pool, err := database.NewPool(ctx, dbCfg, s.logger)
@@ -432,7 +437,7 @@ func (s *Server) runHTTP(ctx context.Context, host string, port int, path string
 	})
 
 	// Add CORS middleware
-	wrappedHandler := withCORS(handler)
+	wrappedHandler := withCORS(handler, s.cfg)
 
 	addr := fmt.Sprintf("%s:%d", host, port)
 	s.logger.Info("HTTP server listening", zap.String("addr", addr))
@@ -444,11 +449,62 @@ func (s *Server) runHTTP(ctx context.Context, host string, port int, path string
 }
 
 // withCORS adds CORS headers to the handler
-func withCORS(next http.Handler) http.Handler {
+// By default, no CORS headers are set unless explicitly configured
+func withCORS(next http.Handler, cfg *config.Config) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		origin := r.Header.Get("Origin")
+
+		// If no origin is provided, skip CORS (same-origin request)
+		if origin == "" {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		// Check if CORS is configured
+		if cfg.CORSAllowOrigins == "" {
+			// No CORS configured - reject cross-origin requests
+			http.Error(w, "CORS policy: cross-origin requests not allowed", http.StatusForbidden)
+			return
+		}
+
+		// Check if origin is allowed
+		allowed := false
+		if cfg.CORSAllowOrigins == "*" {
+			// Wildcard allows all origins
+			allowed = true
+		} else {
+			// Check against allowed origins list
+			allowedOrigins := strings.Split(cfg.CORSAllowOrigins, ",")
+			for _, allowedOrigin := range allowedOrigins {
+				allowedOrigin = strings.TrimSpace(allowedOrigin)
+				if allowedOrigin == origin || allowedOrigin == "*" {
+					allowed = true
+					break
+				}
+			}
+		}
+
+		if !allowed {
+			http.Error(w, "CORS policy: origin not allowed", http.StatusForbidden)
+			return
+		}
+
+		// Set CORS headers
+		if cfg.CORSAllowOrigins == "*" {
+			w.Header().Set("Access-Control-Allow-Origin", "*")
+		} else {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+		}
+
+		if cfg.CORSAllowMethods != "" {
+			w.Header().Set("Access-Control-Allow-Methods", cfg.CORSAllowMethods)
+		}
+		if cfg.CORSAllowHeaders != "" {
+			w.Header().Set("Access-Control-Allow-Headers", cfg.CORSAllowHeaders)
+		}
+		if cfg.CORSAllowCredentials {
+			w.Header().Set("Access-Control-Allow-Credentials", "true")
+		}
 
 		if r.Method == "OPTIONS" {
 			w.WriteHeader(http.StatusOK)

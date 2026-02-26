@@ -6,13 +6,13 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
-	"unicode"
 
 	"github.com/jmoiron/sqlx"
 	_ "github.com/go-sql-driver/mysql"
 	"go.uber.org/zap"
 
 	"github.com/rahadiangg/mcp-mariadb/internal/database"
+	"github.com/rahadiangg/mcp-mariadb/internal/util"
 )
 
 // Column represents a column in a table schema
@@ -40,52 +40,52 @@ type SchemaWithRelations struct {
 	Columns   map[string]Column `json:"columns"`
 }
 
-// ValidationResult is the result of validateIdentifier
-type ValidationResult struct {
-	Valid bool
-	Error string
-}
-
-// validateIdentifier checks if a string is a valid SQL identifier
-func validateIdentifier(name string) ValidationResult {
-	if name == "" {
-		return ValidationResult{Valid: false, Error: "empty identifier"}
-	}
-	// Check if identifier is valid (alphanumeric, underscore, not starting with digit)
-	for i, r := range name {
-		if i == 0 && !unicode.IsLetter(r) && r != '_' {
-			return ValidationResult{Valid: false, Error: fmt.Sprintf("identifier '%s' must start with letter or underscore", name)}
-		}
-		if !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '_' {
-			return ValidationResult{Valid: false, Error: fmt.Sprintf("identifier '%s' contains invalid character: %c", name, r)}
-		}
-	}
-	return ValidationResult{Valid: true}
-}
-
 // stripComments removes SQL comments from a query
+// Handles:
+// - Single-line comments (-- comment)
+// - Hash-style comments (# comment)
+// - Multi-line comments (/* comment */)
+// Note: This is a simple implementation for security purposes.
+// It correctly handles comment stripping for the READ_ONLY check.
 func stripComments(query string) string {
-	// Remove single-line comments (-- comment)
-	re := regexp.MustCompile(`--.*?$`)
+	// Remove multi-line comments first (/* comment */)
+	re := regexp.MustCompile(`/\*[^*]*\*+(?:[^/*][^*]*\*+)*/`)
 	query = re.ReplaceAllString(query, "")
 
-	// Remove multi-line comments (/* comment */)
-	re = regexp.MustCompile(`/\*.*?\*/`)
+	// Remove single-line comments (both -- and # style) including the newline
+	re = regexp.MustCompile(`(?:--|#)[^\n]*\n?`)
 	query = re.ReplaceAllString(query, "")
 
-	return strings.TrimSpace(query)
+	// Trim leading/trailing whitespace
+	query = strings.TrimSpace(query)
+
+	// Normalize multiple spaces to single space
+	re = regexp.MustCompile(`\s+`)
+	query = re.ReplaceAllString(query, " ")
+
+	return query
 }
 
 // isReadOnlyQuery checks if a query is read-only
 func isReadOnlyQuery(query string) bool {
 	queryUpper := strings.ToUpper(stripComments(query))
-	allowedPrefixes := []string{"SELECT", "SHOW", "DESC", "DESCRIBE", "USE", "EXPLAIN"}
+	allowedPrefixes := []string{"SELECT", "SHOW", "DESC", "DESCRIBE", "USE", "EXPLAIN", "WITH"}
 	for _, prefix := range allowedPrefixes {
 		if strings.HasPrefix(queryUpper, prefix) {
 			return true
 		}
 	}
 	return false
+}
+
+// checkReadOnlyMode returns an error if ReadOnly is enabled and the operation is a write operation
+func (s *Server) checkReadOnlyMode(operation string) error {
+	if s.cfg.ReadOnly {
+		s.logger.Warn("Write operation blocked in read-only mode",
+			zap.String("operation", operation))
+		return fmt.Errorf("operation forbidden: server is in read-only mode")
+	}
+	return nil
 }
 
 // listDatabases lists all accessible databases
@@ -124,8 +124,8 @@ func (s *Server) listTables(ctx context.Context, args map[string]interface{}) (i
 		return nil, fmt.Errorf("database_name is required")
 	}
 
-	if v := validateIdentifier(databaseName); !v.Valid {
-		return nil, fmt.Errorf("invalid database_name: %s", v.Error)
+	if err := util.ValidateSQLIdentifier(databaseName); err != nil {
+		return nil, fmt.Errorf("invalid database_name: %w", err)
 	}
 
 	s.logger.Info("TOOL START: list_tables called", zap.String("database", databaseName))
@@ -161,11 +161,11 @@ func (s *Server) getTableSchema(ctx context.Context, args map[string]interface{}
 		return nil, fmt.Errorf("table_name is required")
 	}
 
-	if v := validateIdentifier(databaseName); !v.Valid {
-		return nil, fmt.Errorf("invalid database_name: %s", v.Error)
+	if err := util.ValidateSQLIdentifier(databaseName); err != nil {
+		return nil, fmt.Errorf("invalid database_name: %w", err)
 	}
-	if v := validateIdentifier(tableName); !v.Valid {
-		return nil, fmt.Errorf("invalid table_name: %s", v.Error)
+	if err := util.ValidateSQLIdentifier(tableName); err != nil {
+		return nil, fmt.Errorf("invalid table_name: %w", err)
 	}
 
 	s.logger.Info("TOOL START: get_table_schema called",
@@ -235,11 +235,11 @@ func (s *Server) getTableSchemaWithRelations(ctx context.Context, args map[strin
 		return nil, fmt.Errorf("table_name is required")
 	}
 
-	if v := validateIdentifier(databaseName); !v.Valid {
-		return nil, fmt.Errorf("invalid database_name: %s", v.Error)
+	if err := util.ValidateSQLIdentifier(databaseName); err != nil {
+		return nil, fmt.Errorf("invalid database_name: %w", err)
 	}
-	if v := validateIdentifier(tableName); !v.Valid {
-		return nil, fmt.Errorf("invalid table_name: %s", v.Error)
+	if err := util.ValidateSQLIdentifier(tableName); err != nil {
+		return nil, fmt.Errorf("invalid table_name: %w", err)
 	}
 
 	s.logger.Info("TOOL START: get_table_schema_with_relations called",
@@ -344,9 +344,23 @@ func (s *Server) executeSQL(ctx context.Context, args map[string]interface{}) (i
 
 	// Validate database name if provided
 	if databaseName != "" {
-		if v := validateIdentifier(databaseName); !v.Valid {
-			return nil, fmt.Errorf("invalid database_name: %s", v.Error)
+		if err := util.ValidateSQLIdentifier(databaseName); err != nil {
+			return nil, fmt.Errorf("invalid database_name: %w", err)
 		}
+	}
+
+	// Check query size limit to prevent DoS
+	if len(sqlQuery) > s.cfg.MaxQuerySize {
+		s.logger.Warn("Query exceeds maximum size",
+			zap.Int("query_size", len(sqlQuery)),
+			zap.Int("max_size", s.cfg.MaxQuerySize))
+		return nil, fmt.Errorf("query size %d bytes exceeds maximum allowed size of %d bytes", len(sqlQuery), s.cfg.MaxQuerySize)
+	}
+
+	// Check for dangerous SQL injection patterns
+	if err := util.ValidateQueryForInjection(sqlQuery); err != nil {
+		s.logger.Warn("Dangerous query pattern detected", zap.Error(err))
+		return nil, fmt.Errorf("query blocked: %w", err)
 	}
 
 	// Check for multi-statement injection attempts
@@ -432,8 +446,13 @@ func (s *Server) createDatabase(ctx context.Context, args map[string]interface{}
 		return nil, fmt.Errorf("database_name is required")
 	}
 
-	if v := validateIdentifier(databaseName); !v.Valid {
-		return nil, fmt.Errorf("invalid database_name: %s", v.Error)
+	if err := util.ValidateSQLIdentifier(databaseName); err != nil {
+		return nil, fmt.Errorf("invalid database_name: %w", err)
+	}
+
+	// Check read-only mode
+	if err := s.checkReadOnlyMode("create_database"); err != nil {
+		return nil, err
 	}
 
 	s.logger.Info("TOOL START: create_database called", zap.String("database", databaseName))
@@ -490,11 +509,16 @@ func (s *Server) createVectorStore(ctx context.Context, args map[string]interfac
 		return nil, fmt.Errorf("vector_store_name is required")
 	}
 
-	if v := validateIdentifier(databaseName); !v.Valid {
-		return nil, fmt.Errorf("invalid database_name: %s", v.Error)
+	if err := util.ValidateSQLIdentifier(databaseName); err != nil {
+		return nil, fmt.Errorf("invalid database_name: %w", err)
 	}
-	if v := validateIdentifier(vectorStoreName); !v.Valid {
-		return nil, fmt.Errorf("invalid vector_store_name: %s", v.Error)
+	if err := util.ValidateSQLIdentifier(vectorStoreName); err != nil {
+		return nil, fmt.Errorf("invalid vector_store_name: %w", err)
+	}
+
+	// Check read-only mode
+	if err := s.checkReadOnlyMode("create_vector_store"); err != nil {
+		return nil, err
 	}
 
 	// Get optional parameters
@@ -605,8 +629,8 @@ func (s *Server) listVectorStores(ctx context.Context, args map[string]interface
 		return nil, fmt.Errorf("database_name is required")
 	}
 
-	if v := validateIdentifier(databaseName); !v.Valid {
-		return nil, fmt.Errorf("invalid database_name: %s", v.Error)
+	if err := util.ValidateSQLIdentifier(databaseName); err != nil {
+		return nil, fmt.Errorf("invalid database_name: %w", err)
 	}
 
 	s.logger.Info("TOOL START: list_vector_stores called", zap.String("database", databaseName))
@@ -662,11 +686,16 @@ func (s *Server) deleteVectorStore(ctx context.Context, args map[string]interfac
 		return nil, fmt.Errorf("vector_store_name is required")
 	}
 
-	if v := validateIdentifier(databaseName); !v.Valid {
-		return nil, fmt.Errorf("invalid database_name: %s", v.Error)
+	if err := util.ValidateSQLIdentifier(databaseName); err != nil {
+		return nil, fmt.Errorf("invalid database_name: %w", err)
 	}
-	if v := validateIdentifier(vectorStoreName); !v.Valid {
-		return nil, fmt.Errorf("invalid vector_store_name: %s", v.Error)
+	if err := util.ValidateSQLIdentifier(vectorStoreName); err != nil {
+		return nil, fmt.Errorf("invalid vector_store_name: %w", err)
+	}
+
+	// Check read-only mode
+	if err := s.checkReadOnlyMode("delete_vector_store"); err != nil {
+		return nil, err
 	}
 
 	s.logger.Info("TOOL START: delete_vector_store called",
@@ -773,11 +802,16 @@ func (s *Server) insertDocsVectorStore(ctx context.Context, args map[string]inte
 		return nil, fmt.Errorf("vector_store_name is required")
 	}
 
-	if v := validateIdentifier(databaseName); !v.Valid {
-		return nil, fmt.Errorf("invalid database_name: %s", v.Error)
+	if err := util.ValidateSQLIdentifier(databaseName); err != nil {
+		return nil, fmt.Errorf("invalid database_name: %w", err)
 	}
-	if v := validateIdentifier(vectorStoreName); !v.Valid {
-		return nil, fmt.Errorf("invalid vector_store_name: %s", v.Error)
+	if err := util.ValidateSQLIdentifier(vectorStoreName); err != nil {
+		return nil, fmt.Errorf("invalid vector_store_name: %w", err)
+	}
+
+	// Check read-only mode
+	if err := s.checkReadOnlyMode("insert_docs_vector_store"); err != nil {
+		return nil, err
 	}
 
 	// Get documents array
@@ -907,11 +941,11 @@ func (s *Server) searchVectorStore(ctx context.Context, args map[string]interfac
 		return nil, fmt.Errorf("vector_store_name is required")
 	}
 
-	if v := validateIdentifier(databaseName); !v.Valid {
-		return nil, fmt.Errorf("invalid database_name: %s", v.Error)
+	if err := util.ValidateSQLIdentifier(databaseName); err != nil {
+		return nil, fmt.Errorf("invalid database_name: %w", err)
 	}
-	if v := validateIdentifier(vectorStoreName); !v.Valid {
-		return nil, fmt.Errorf("invalid vector_store_name: %s", v.Error)
+	if err := util.ValidateSQLIdentifier(vectorStoreName); err != nil {
+		return nil, fmt.Errorf("invalid vector_store_name: %w", err)
 	}
 	if userQuery == "" {
 		return nil, fmt.Errorf("user_query must not be empty")
